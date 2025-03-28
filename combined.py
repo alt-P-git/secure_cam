@@ -5,6 +5,7 @@ import gradio as gr
 from transformers import pipeline
 from PIL import Image
 from ultralytics import YOLO
+import socket
 
 # Load MobileNetSSD for People Counting
 PATH_PROTOTXT = os.path.join('saved_model/MobileNetSSD_deploy.prototxt')
@@ -23,6 +24,15 @@ weapon_model = YOLO('best.pt', verbose=False)
 # Load additional models
 fire_detector = pipeline("image-classification", model="EdBianchi/vit-fire-detection")
 mask_detector = pipeline("image-classification", model="Heem2/Facemask-detection")
+
+# Function to send alerts via socket
+def send_alert(message, host='127.0.0.1', port=65432):
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_socket:
+            client_socket.connect((host, port))
+            client_socket.sendall(message.encode('utf-8'))
+    except ConnectionRefusedError:
+        print("Failed to connect to the alert server. Is it running?")
 
 def process_frame():
     cap = cv2.VideoCapture(0)
@@ -95,6 +105,16 @@ def process_frame():
         
         final_output = int(fire_detected or gun_detected or people_count > 1 or masked_detected)
 
+        # Send alerts via socket
+        if fire_detected:
+            send_alert("Fire Alert: True")
+        if gun_detected:
+            send_alert("Gun Alert: True")
+        if masked_detected:
+            send_alert("Masked Alert: True")
+        if people_count > 1:
+            send_alert("People_Alert: True")
+        
         cv2.putText(processed_frame, f"People Count: {people_count}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         cv2.putText(processed_frame, f"Fire: {fire_result}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255) if fire_detected else (0, 255, 0), 2)
         cv2.putText(processed_frame, f"Gun: {'Detected' if gun_detected else 'None'}", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255) if gun_detected else (0, 255, 0), 2)
