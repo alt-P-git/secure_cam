@@ -88,8 +88,9 @@ def process_frame():
 
         for result in results:
             for box in result.boxes:
+                confidence = float(box.conf[0].item())
                 class_id = int(box.cls[0].item())  # Get the class index
-                if classNames[class_id] in classNames:  # Check if detected class is in weapons list
+                if classNames[class_id] in classNames and confidence > 0.7:  # Check if detected class is in weapons list
                     gun_detected = True
                     break
         
