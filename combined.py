@@ -6,6 +6,7 @@ from transformers import pipeline
 from PIL import Image
 from ultralytics import YOLO
 import socket
+import json
 
 # Load MobileNetSSD for People Counting
 PATH_PROTOTXT = os.path.join('saved_model/MobileNetSSD_deploy.prototxt')
@@ -26,11 +27,11 @@ fire_detector = pipeline("image-classification", model="EdBianchi/vit-fire-detec
 mask_detector = pipeline("image-classification", model="Heem2/Facemask-detection")
 
 # Function to send alerts via socket
-def send_alert(message, host='127.0.0.1', port=65432):
+def send_alert(data, host='127.0.0.1', port=65432):
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_socket:
             client_socket.connect((host, port))
-            client_socket.sendall(message.encode('utf-8'))
+            client_socket.sendall(json.dumps(data).encode('utf-8'))  # Send JSON data
     except ConnectionRefusedError:
         print("Failed to connect to the alert server. Is it running?")
 
@@ -103,25 +104,42 @@ def process_frame():
                     gun_detected = True
                     break
         
-        final_output = int(fire_detected or gun_detected or people_count > 1 or masked_detected)
+        # Prepare JSON data for alert
+        alert_data = {
+            "Fire": False,
+            "Gun": False,
+            "Masked": False,
+            "People_Count": 0
+        }
 
-        # Send alerts via socket
+        # Update alert_data based on detection results
         if fire_detected:
-            send_alert("Fire Alert: True")
+            alert_data["Fire"] = True
         if gun_detected:
-            send_alert("Gun Alert: True")
+            alert_data["Gun"] = True
         if masked_detected:
-            send_alert("Masked Alert: True")
-        if people_count > 1:
-            send_alert("People_Alert: True")
+            alert_data["Masked"] = True
+        if people_count > 0:
+            alert_data["People_Count"] = people_count
+
+        # Send the JSON alert
+        send_alert(alert_data)
+
+        # Reset alert_data to default values
+        alert_data = {
+            "Fire": False,
+            "Gun": False,
+            "Masked": False,
+            "People_Count": 0
+        }
         
         cv2.putText(processed_frame, f"People Count: {people_count}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         cv2.putText(processed_frame, f"Fire: {fire_result}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255) if fire_detected else (0, 255, 0), 2)
         cv2.putText(processed_frame, f"Gun: {'Detected' if gun_detected else 'None'}", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255) if gun_detected else (0, 255, 0), 2)
-        cv2.putText(processed_frame, f"Final Output: {final_output}", (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        cv2.putText(processed_frame, f"Final Output: {int(fire_detected or gun_detected or people_count > 1 or masked_detected)}", (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
         processed_frame = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB)
-        yield processed_frame, people_count, fire_result, gun_detected, final_output
+        yield processed_frame, people_count, fire_result, gun_detected, int(fire_detected or gun_detected or people_count > 1 or masked_detected)
     
     cap.release()
 
