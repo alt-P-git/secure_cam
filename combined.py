@@ -7,7 +7,6 @@ from PIL import Image
 from ultralytics import YOLO
 import socket
 import json
-import threading
 
 # Load MobileNetSSD for People Counting
 PATH_PROTOTXT = os.path.join('saved_model/MobileNetSSD_deploy.prototxt')
@@ -27,36 +26,14 @@ weapon_model = YOLO('best.pt', verbose=False)
 fire_detector = pipeline("image-classification", model="EdBianchi/vit-fire-detection")
 mask_detector = pipeline("image-classification", model="Heem2/Facemask-detection")
 
-# Shared variable for alert data
-alert_signal = {"Alert": 0}  # Default alert signal
-
-# Lock for thread-safe access to alert_signal
-alert_lock = threading.Lock()
-
-# Function to receive alerts from coms.py
-def receive_alerts(host='127.0.0.1', port=65432):
-    """Start a server to receive alert signals from coms.py."""
-    global alert_signal
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
-        server_socket.bind((host, port))
-        server_socket.listen()
-        print(f"Alert signal server started. Listening on {host}:{port}...")
-        
-        while True:
-            conn, addr = server_socket.accept()
-            with conn:
-                print(f"Connected by {addr}")
-                while True:
-                    data = conn.recv(1024)
-                    if not data:
-                        break
-                    with alert_lock:
-                        alert_signal = json.loads(data.decode('utf-8'))
-                        print(f"Received Alert Signal: {alert_signal}")
-
-# Start the alert signal server in a separate thread
-alert_thread = threading.Thread(target=receive_alerts, daemon=True)
-alert_thread.start()
+# Function to send alerts via socket
+def send_alert(data, host='127.0.0.1', port=65432):
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_socket:
+            client_socket.connect((host, port))
+            client_socket.sendall(json.dumps(data).encode('utf-8'))  # Send JSON data
+    except ConnectionRefusedError:
+        print("Failed to connect to the alert server. Is it running?")
 
 def process_frame():
     cap = cv2.VideoCapture(0)
@@ -77,7 +54,7 @@ def process_frame():
             NET.setInput(blob)
             detections = NET.forward()
 
-            for i in detections.shape[2]:
+            for i in range(detections.shape[2]):
                 confidence = detections[0, 0, i, 2]
                 class_idx = int(detections[0, 0, i, 1])
 
@@ -107,6 +84,8 @@ def process_frame():
 
             return frame, counting, masked_detected
 
+
+
         processed_frame, people_count, masked_detected = person_counting_and_mask(frame.copy())
         
         # Fire detection
@@ -127,17 +106,33 @@ def process_frame():
         
         # Prepare JSON data for alert
         alert_data = {
-            "Fire": fire_detected,
-            "Gun": gun_detected,
-            "Masked": masked_detected,
-            "People_Count": people_count
+            "Fire": False,
+            "Gun": False,
+            "Masked": False,
+            "People_Count": 0
         }
 
-        # Display the alert signal received from coms.py
-        with alert_lock:
-            external_alert = alert_signal.get("Alert", 0)
+        # Update alert_data based on detection results
+        if fire_detected:
+            alert_data["Fire"] = True
+        if gun_detected:
+            alert_data["Gun"] = True
+        if masked_detected:
+            alert_data["Masked"] = True
+        if people_count > 0:
+            alert_data["People_Count"] = people_count
 
-        cv2.putText(processed_frame, f"External Alert: {external_alert}", (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255) if external_alert else (0, 255, 0), 2)
+        # Send the JSON alert
+        send_alert(alert_data)
+
+        # Reset alert_data to default values
+        alert_data = {
+            "Fire": False,
+            "Gun": False,
+            "Masked": False,
+            "People_Count": 0
+        }
+        
         cv2.putText(processed_frame, f"People Count: {people_count}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         cv2.putText(processed_frame, f"Fire: {fire_result}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255) if fire_detected else (0, 255, 0), 2)
         cv2.putText(processed_frame, f"Gun: {'Detected' if gun_detected else 'None'}", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255) if gun_detected else (0, 255, 0), 2)
@@ -157,8 +152,7 @@ iface = gr.Interface(
         gr.Number(label="People Count"),
         gr.Label(label="Fire Detection"),
         gr.Label(label="Gun Detection"),
-        gr.Number(label="Final Output"),
-        gr.Label(label="External Alert")  # Display external alert
+        gr.Number(label="Final Output")
     ],
     live=True,
     title="Multi-Object Detection with Live Webcam Feed"
