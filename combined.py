@@ -5,8 +5,11 @@ import gradio as gr
 from transformers import pipeline
 from PIL import Image
 from ultralytics import YOLO
-import socket
-import json
+
+import time
+import serial
+import threading
+from collections import deque
 
 # Load MobileNetSSD for People Counting
 PATH_PROTOTXT = os.path.join('saved_model/MobileNetSSD_deploy.prototxt')
@@ -26,18 +29,58 @@ weapon_model = YOLO('best.pt', verbose=False)
 fire_detector = pipeline("image-classification", model="EdBianchi/vit-fire-detection")
 mask_detector = pipeline("image-classification", model="Heem2/Facemask-detection")
 
-alert = True
+global alert
+alert = False
 
-# Function to send alerts via socket
-def send_alert(data, host='127.0.0.1', port=65432):
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_socket:
-            client_socket.connect((host, port))
-            client_socket.sendall(json.dumps(data).encode('utf-8'))  # Send JSON data
-    except ConnectionRefusedError:
-        print("Failed to connect to the alert server. Is it running?")
+arduino = serial.Serial('COM4', 9600)
+
+DISTANCE_THRESHOLD = 20  # cm
+GAS_THRESHOLD = 150  # Adjust based on testing
+SCORE_THRESHOLD = 0.4  # Threshold for triggering an alert
+
+# Weights for parameters
+WEIGHTS = {
+    "Obstruction": 0.4,
+    "Smoke": 0.4,
+    "Fire": 0.25,
+    "Gun": 0.1,
+    "Masked": 0.03,
+    "People_Count": 0.02
+}
+
+alert_data = {
+    "Obstruction": False,
+    "Smoke": False,
+    "Fire": False,
+    "Gun": False,
+    "Masked": False,
+    "People_Count": 0
+}
+
+score_buffer = deque(maxlen=5)
+
+def calculate_weighted_score(data):
+    """Calculate the weighted score based on the input data."""
+    score = 0
+    for key, weight in WEIGHTS.items():
+        if key == "People_Count":
+            # Normalize People_Count to a value between 0 and 1
+            normalized_people_count = min(data[key] / 10, 1)  # Assume max 10 people
+            score += normalized_people_count * weight
+        else:
+            score += (1 if data[key] else 0) * weight
+    return score
+
+def stabilize_score(new_score):
+    """Stabilize the score using a moving average."""
+    score_buffer.append(new_score)
+    return sum(score_buffer) / len(score_buffer)
 
 def process_frame():
+    global alert
+    global arduino
+    global alert_data
+
     cap = cv2.VideoCapture(2)
     
     while cap.isOpened():
@@ -105,35 +148,36 @@ def process_frame():
                 if classNames[class_id] in classNames:  # Check if detected class is in weapons list
                     gun_detected = True
                     break
-        
-        # Prepare JSON data for alert
-        alert_data = {
-            "Fire": False,
-            "Gun": False,
-            "Masked": False,
-            "People_Count": 0
-        }
+
+        # # Fetch Arduino Data
+        # try:
+        #     arduino_data = arduino.readline().decode('utf-8').strip()
+        #     distance, gas_value = map(int, arduino_data.split(','))
+        #     obstruction = distance < DISTANCE_THRESHOLD
+        #     smoke_detected = gas_value > GAS_THRESHOLD
+        # except Exception as e:
+        #     print(f"Error reading Arduino data: {e}")
+        #     obstruction, smoke_detected = False, False
 
         # Update alert_data based on detection results
         if fire_detected:
             alert_data["Fire"] = True
+        else:
+            alert_data["Fire"] = False
         if gun_detected:
             alert_data["Gun"] = True
+        else:
+            alert_data["Gun"] = False
         if masked_detected:
             alert_data["Masked"] = True
+        else:
+            alert_data["Masked"] = False
         if people_count > 0:
             alert_data["People_Count"] = people_count
+        else:
+            alert_data["People_Count"] = 0
 
-        # Send the JSON alert
-        send_alert(alert_data)
 
-        # Reset alert_data to default values
-        alert_data = {
-            "Fire": False,
-            "Gun": False,
-            "Masked": False,
-            "People_Count": 0
-        }
         
         cv2.putText(processed_frame, f"People Count: {people_count}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         cv2.putText(processed_frame, f"Fire: {fire_result}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255) if fire_detected else (0, 255, 0), 2)
@@ -147,6 +191,39 @@ def process_frame():
         yield processed_frame, people_count, fire_result, gun_string, int(fire_detected or gun_detected or people_count > 1 or masked_detected), alert_string
     
     cap.release()
+
+def read_arduino_data():
+    global alert_data, alert
+    while True:
+        try:
+            arduino_data = arduino.readline().decode('utf-8').strip()
+            if arduino_data:
+                distance, gas_value = map(int, arduino_data.split(','))
+                alert_data["Obstruction"] = distance < DISTANCE_THRESHOLD
+                alert_data["Smoke"] = gas_value > GAS_THRESHOLD
+
+            raw_score = calculate_weighted_score(alert_data)
+            stabilized_score = stabilize_score(raw_score)
+        
+            if alert == False:
+                arduino.write(b'0')
+                alert = stabilized_score >= SCORE_THRESHOLD
+            if alert:
+                arduino.write(b'1')
+            print(alert_data)
+            print(stabilized_score)
+            print(f"Alert Status: {alert}")
+        except Exception as e:
+            print(f"Error reading Arduino data: {e}")
+            alert_data["Obstruction"] = False
+            alert_data["Smoke"] = False
+        
+        # time.sleep(0.5)
+
+# Start Arduino thread
+arduino_thread = threading.Thread(target=read_arduino_data)
+arduino_thread.daemon = True
+arduino_thread.start()
 
 def dismiss_alert():
     global alert
