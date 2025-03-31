@@ -26,6 +26,8 @@ weapon_model = YOLO('best.pt', verbose=False)
 fire_detector = pipeline("image-classification", model="EdBianchi/vit-fire-detection")
 mask_detector = pipeline("image-classification", model="Heem2/Facemask-detection")
 
+alert = True
+
 # Function to send alerts via socket
 def send_alert(data, host='127.0.0.1', port=65432):
     try:
@@ -36,7 +38,7 @@ def send_alert(data, host='127.0.0.1', port=65432):
         print("Failed to connect to the alert server. Is it running?")
 
 def process_frame():
-    cap = cv2.VideoCapture(0)
+    cap = cv2.VideoCapture(2)
     
     while cap.isOpened():
         ret, frame = cap.read()
@@ -139,23 +141,58 @@ def process_frame():
         cv2.putText(processed_frame, f"Final Output: {int(fire_detected or gun_detected or people_count > 1 or masked_detected)}", (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
         processed_frame = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB)
-        yield processed_frame, people_count, fire_result, gun_detected, int(fire_detected or gun_detected or people_count > 1 or masked_detected)
+        alert_string = "Alert" if alert else "No Alert"
+        gun_string = "Detected" if gun_detected else "None"
+        
+        yield processed_frame, people_count, fire_result, gun_string, int(fire_detected or gun_detected or people_count > 1 or masked_detected), alert_string
     
     cap.release()
 
-# Gradio Interface
-iface = gr.Interface(
-    fn=process_frame,
-    inputs=[],
-    outputs=[
-        gr.Image(label="Live Detection", streaming=True),
-        gr.Number(label="People Count"),
-        gr.Label(label="Fire Detection"),
-        gr.Label(label="Gun Detection"),
-        gr.Number(label="Final Output")
-    ],
-    live=True,
-    title="Multi-Object Detection with Live Webcam Feed"
-)
+def dismiss_alert():
+    global alert
+    alert = False
+    return "No Alert"
 
-iface.launch()
+def update_dismiss_button(alert_status):
+    if alert_status == "Alert":
+        return gr.update(visible=True)
+    else:
+        return gr.update(visible=False)
+
+# Gradio Interface
+with gr.Blocks() as UI:
+    gr.Markdown("# Multi-Object Detection with Live Webcam Feed")
+    
+    with gr.Row():
+        video_output = gr.Image(label="Live Detection")  # Removed streaming=True here
+        with gr.Column():
+            people_count_output = gr.Number(label="People Count")
+            fire_output = gr.Label(label="Fire Detection")
+            gun_output = gr.Label(label="Gun Detection")
+            final_output_display = gr.Number(label="Final Output")
+            alert_display = gr.Label(label="Alert Status", value="No Alert")
+            dismiss_btn = gr.Button("Dismiss Alert", visible=False)
+    
+    # We use an Interface with live=True for streaming the generator outputs
+    stream_interface = gr.Interface(
+        fn=process_frame,
+        inputs=[],
+        outputs=[
+            video_output,
+            people_count_output,
+            fire_output,
+            gun_output,
+            final_output_display,
+            alert_display
+        ],
+        live=True  # This ensures the process_frame generator is polled continuously
+    )
+    
+    stream_interface.render()
+    
+    # When alert_display changes, show/hide the dismiss button
+    alert_display.change(fn=update_dismiss_button, inputs=[alert_display], outputs=[dismiss_btn])
+    # Clicking dismiss updates the label to "No Alert"
+    dismiss_btn.click(fn=dismiss_alert, inputs=[], outputs=[alert_display])
+
+UI.launch()
