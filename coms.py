@@ -85,6 +85,7 @@ def read_from_arduino():
                 # Stabilize the score using a moving average
                 stabilized_score = stabilize_score(raw_score)
 
+                print("Stabilized Score: ", stabilized_score)
                 # Check if the stabilized score exceeds the threshold
                 if stabilized_score > SCORE_THRESHOLD:
                     alert_signal = {"Alert": 1}

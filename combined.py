@@ -94,6 +94,11 @@ def process_frame():
     global alert_data
 
     cap = cv2.VideoCapture(2)
+    global alert
+    global arduino
+    global alert_data
+
+    cap = cv2.VideoCapture(2)
     
     while cap.isOpened():
         ret, frame = cap.read()
@@ -111,6 +116,7 @@ def process_frame():
             NET.setInput(blob)
             detections = NET.forward()
 
+            for i in range(detections.shape[2]):
             for i in range(detections.shape[2]):
                 confidence = detections[0, 0, i, 2]
                 class_idx = int(detections[0, 0, i, 1])
@@ -140,6 +146,8 @@ def process_frame():
                     cv2.putText(frame, mask_label, (x_min, y_min - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
             return frame, counting, masked_detected
+
+
 
 
 
@@ -191,12 +199,47 @@ def process_frame():
 
 
         
+
+        # # Fetch Arduino Data
+        # try:
+        #     arduino_data = arduino.readline().decode('utf-8').strip()
+        #     distance, gas_value = map(int, arduino_data.split(','))
+        #     obstruction = distance < DISTANCE_THRESHOLD
+        #     smoke_detected = gas_value > GAS_THRESHOLD
+        # except Exception as e:
+        #     print(f"Error reading Arduino data: {e}")
+        #     obstruction, smoke_detected = False, False
+
+        # Update alert_data based on detection results
+        if fire_detected:
+            alert_data["Fire"] = True
+        else:
+            alert_data["Fire"] = False
+        if gun_detected:
+            alert_data["Gun"] = True
+        else:
+            alert_data["Gun"] = False
+        if masked_detected:
+            alert_data["Masked"] = True
+        else:
+            alert_data["Masked"] = False
+        if people_count > 0:
+            alert_data["People_Count"] = people_count
+        else:
+            alert_data["People_Count"] = 0
+
+
+        
         cv2.putText(processed_frame, f"People Count: {people_count}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         cv2.putText(processed_frame, f"Fire: {fire_result}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255) if fire_detected else (0, 255, 0), 2)
         cv2.putText(processed_frame, f"Gun: {'Detected' if gun_detected else 'None'}", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255) if gun_detected else (0, 255, 0), 2)
         cv2.putText(processed_frame, f"Final Output: {int(fire_detected or gun_detected or people_count > 1 or masked_detected)}", (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
         processed_frame = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB)
+        alert_string = "Alert" if alert else "No Alert"
+        gun_string = "Detected" if gun_detected else "None"
+        
+        yield processed_frame, people_count, fire_result, gun_string, int(fire_detected or gun_detected or people_count > 1 or masked_detected), alert_string
         alert_string = "Alert" if alert else "No Alert"
         gun_string = "Detected" if gun_detected else "None"
         
@@ -254,6 +297,42 @@ def update_dismiss_button(alert_status):
         return gr.update(visible=False)
 
 # Gradio Interface
+with gr.Blocks() as UI:
+    gr.Markdown("# Multi-Object Detection with Live Webcam Feed")
+    
+    with gr.Row():
+        video_output = gr.Image(label="Live Detection")  # Removed streaming=True here
+        with gr.Column():
+            people_count_output = gr.Number(label="People Count")
+            fire_output = gr.Label(label="Fire Detection")
+            gun_output = gr.Label(label="Gun Detection")
+            final_output_display = gr.Number(label="Final Output")
+            alert_display = gr.Label(label="Alert Status", value="No Alert")
+            dismiss_btn = gr.Button("Dismiss Alert", visible=False)
+    
+    # We use an Interface with live=True for streaming the generator outputs
+    stream_interface = gr.Interface(
+        fn=process_frame,
+        inputs=[],
+        outputs=[
+            video_output,
+            people_count_output,
+            fire_output,
+            gun_output,
+            final_output_display,
+            alert_display
+        ],
+        live=True  # This ensures the process_frame generator is polled continuously
+    )
+    
+    stream_interface.render()
+    
+    # When alert_display changes, show/hide the dismiss button
+    alert_display.change(fn=update_dismiss_button, inputs=[alert_display], outputs=[dismiss_btn])
+    # Clicking dismiss updates the label to "No Alert"
+    dismiss_btn.click(fn=dismiss_alert, inputs=[], outputs=[alert_display])
+
+UI.launch()
 with gr.Blocks() as UI:
     gr.Markdown("# Multi-Object Detection with Live Webcam Feed")
     
