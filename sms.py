@@ -4,7 +4,7 @@ import boto3
 sns = boto3.client("sns", region_name="ap-south-1")  # Use the region that supports SMS
 
 # Replace with your mobile number in E.164 format
-phone_number = "+917028988195"
+phone_number = "+918533999067"
 
 # Publish SMS message
 response = sns.publish(

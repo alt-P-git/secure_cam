@@ -6,6 +6,7 @@ from transformers import pipeline
 from PIL import Image
 from ultralytics import YOLO
 import boto3
+import asyncio
 
 import time
 import serial
@@ -33,19 +34,19 @@ mask_detector = pipeline("image-classification", model="Heem2/Facemask-detection
 global alert
 alert = False
 sms_sent = False
-sms_toggle = True  #turn global sms system on or off
+sms_toggle = False  #turn global sms system on or off
 arduino = serial.Serial('COM4', 9600)
 
 DISTANCE_THRESHOLD = 20  # cm
-GAS_THRESHOLD = 150  # Adjust based on testing
-SCORE_THRESHOLD = 0.4  # Threshold for triggering an alert
+GAS_THRESHOLD = 400  # Adjust based on testing
+SCORE_THRESHOLD = 1  # Threshold for triggering an alert
 
 # Weights for parameters
 WEIGHTS = {
-    "Obstruction": 0.4,
-    "Smoke": 0.4,
-    "Fire": 0.25,
-    "Gun": 0.1,
+    "Obstruction": 5,
+    "Smoke": 5,
+    "Fire": 0.35,
+    "Gun": 0.2,
     "Masked": 0.03,
     "People_Count": 0.02
 }
@@ -60,6 +61,7 @@ alert_data = {
 }
 
 score_buffer = deque(maxlen=5)
+smoke_values = deque(maxlen=5)
 
 def calculate_weighted_score(data):
     """Calculate the weighted score based on the input data."""
@@ -93,12 +95,7 @@ def process_frame():
     global arduino
     global alert_data
 
-    cap = cv2.VideoCapture(2)
-    global alert
-    global arduino
-    global alert_data
-
-    cap = cv2.VideoCapture(2)
+    cap = cv2.VideoCapture(0)
     
     while cap.isOpened():
         ret, frame = cap.read()
@@ -116,7 +113,6 @@ def process_frame():
             NET.setInput(blob)
             detections = NET.forward()
 
-            for i in range(detections.shape[2]):
             for i in range(detections.shape[2]):
                 confidence = detections[0, 0, i, 2]
                 class_idx = int(detections[0, 0, i, 1])
@@ -248,14 +244,20 @@ def process_frame():
     cap.release()
 
 def read_arduino_data():
-    global alert_data, alert
+    global alert_data, alert, sms_sent, sms_toggle, smoke_values
     while True:
         try:
             arduino_data = arduino.readline().decode('utf-8').strip()
             if arduino_data:
                 distance, gas_value = map(int, arduino_data.split(','))
                 alert_data["Obstruction"] = distance < DISTANCE_THRESHOLD
-                alert_data["Smoke"] = gas_value > GAS_THRESHOLD
+                smoke_values.append(gas_value)
+
+                is_smoke_increasing = False
+                if len(smoke_values) > 1 and smoke_values[-1] > smoke_values[-2]:
+                    is_smoke_increasing = True
+
+                alert_data["Smoke"] = is_smoke_increasing and gas_value >= GAS_THRESHOLD
 
             raw_score = calculate_weighted_score(alert_data)
             stabilized_score = stabilize_score(raw_score)
@@ -264,7 +266,7 @@ def read_arduino_data():
                 arduino.write(b'0')
                 alert = stabilized_score >= SCORE_THRESHOLD
                 if alert and not sms_sent and sms_toggle:
-                    send_sms_alert()
+                    threading.Thread(target=send_sms_alert, daemon=True).start()
                     sms_sent = True
             if alert:
                 arduino.write(b'1')
@@ -285,7 +287,9 @@ arduino_thread.daemon = True
 arduino_thread.start()
 
 def dismiss_alert():
-    global alert
+    global alert, sms_sent
+    global score_buffer
+    score_buffer = deque([0]*5, maxlen=5)
     alert = False
     sms_sent = False
     return "No Alert"
