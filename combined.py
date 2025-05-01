@@ -5,9 +5,12 @@ import gradio as gr
 from transformers import pipeline
 from PIL import Image
 from ultralytics import YOLO
-import socket
-import json
+import boto3
+
+import time
+import serial
 import threading
+from collections import deque
 
 # Load MobileNetSSD for People Counting
 PATH_PROTOTXT = os.path.join('saved_model/MobileNetSSD_deploy.prototxt')
@@ -27,39 +30,70 @@ weapon_model = YOLO('best.pt', verbose=False)
 fire_detector = pipeline("image-classification", model="EdBianchi/vit-fire-detection")
 mask_detector = pipeline("image-classification", model="Heem2/Facemask-detection")
 
-# Shared variable for alert data
-alert_signal = {"Alert": 0}  # Default alert signal
+global alert
+alert = False
+sms_sent = False
+sms_toggle = True  #turn global sms system on or off
+arduino = serial.Serial('COM4', 9600)
 
-# Lock for thread-safe access to alert_signal
-alert_lock = threading.Lock()
+DISTANCE_THRESHOLD = 20  # cm
+GAS_THRESHOLD = 150  # Adjust based on testing
+SCORE_THRESHOLD = 0.4  # Threshold for triggering an alert
 
-# Function to receive alerts from coms.py
-def receive_alerts(host='127.0.0.1', port=65432):
-    """Start a server to receive alert signals from coms.py."""
-    global alert_signal
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
-        server_socket.bind((host, port))
-        server_socket.listen()
-        print(f"Alert signal server started. Listening on {host}:{port}...")
-        
-        while True:
-            conn, addr = server_socket.accept()
-            with conn:
-                print(f"Connected by {addr}")
-                while True:
-                    data = conn.recv(1024)
-                    if not data:
-                        break
-                    with alert_lock:
-                        alert_signal = json.loads(data.decode('utf-8'))
-                        print(f"Received Alert Signal: {alert_signal}")
+# Weights for parameters
+WEIGHTS = {
+    "Obstruction": 0.4,
+    "Smoke": 0.4,
+    "Fire": 0.25,
+    "Gun": 0.1,
+    "Masked": 0.03,
+    "People_Count": 0.02
+}
 
-# Start the alert signal server in a separate thread
-alert_thread = threading.Thread(target=receive_alerts, daemon=True)
-alert_thread.start()
+alert_data = {
+    "Obstruction": False,
+    "Smoke": False,
+    "Fire": False,
+    "Gun": False,
+    "Masked": False,
+    "People_Count": 0
+}
+
+score_buffer = deque(maxlen=5)
+
+def calculate_weighted_score(data):
+    """Calculate the weighted score based on the input data."""
+    score = 0
+    for key, weight in WEIGHTS.items():
+        if key == "People_Count":
+            # Normalize People_Count to a value between 0 and 1
+            normalized_people_count = min(data[key] / 10, 1)  # Assume max 10 people
+            score += normalized_people_count * weight
+        else:
+            score += (1 if data[key] else 0) * weight
+    return score
+
+def stabilize_score(new_score):
+    """Stabilize the score using a moving average."""
+    score_buffer.append(new_score)
+    return sum(score_buffer) / len(score_buffer)
+
+def send_sms_alert():
+    try:
+        sns = boto3.client('sns', region_name='ap-south-1')  # or your region
+        phone_number = "+918533999067"  # Replace with verified phone number
+        message = "ALERT: Suspicious activity detected by surveillance system."
+        sns.publish(PhoneNumber=phone_number, Message=message)
+        print("SMS sent.")
+    except Exception as e:
+        print(f"Failed to send SMS: {e}")
 
 def process_frame():
-    cap = cv2.VideoCapture(0)
+    global alert
+    global arduino
+    global alert_data
+
+    cap = cv2.VideoCapture(2)
     
     while cap.isOpened():
         ret, frame = cap.read()
@@ -77,7 +111,7 @@ def process_frame():
             NET.setInput(blob)
             detections = NET.forward()
 
-            for i in detections.shape[2]:
+            for i in range(detections.shape[2]):
                 confidence = detections[0, 0, i, 2]
                 class_idx = int(detections[0, 0, i, 1])
 
@@ -107,6 +141,8 @@ def process_frame():
 
             return frame, counting, masked_detected
 
+
+
         processed_frame, people_count, masked_detected = person_counting_and_mask(frame.copy())
         
         # Fire detection
@@ -124,44 +160,133 @@ def process_frame():
                 if classNames[class_id] in classNames:  # Check if detected class is in weapons list
                     gun_detected = True
                     break
+
+        # # Fetch Arduino Data
+        # try:
+        #     arduino_data = arduino.readline().decode('utf-8').strip()
+        #     distance, gas_value = map(int, arduino_data.split(','))
+        #     obstruction = distance < DISTANCE_THRESHOLD
+        #     smoke_detected = gas_value > GAS_THRESHOLD
+        # except Exception as e:
+        #     print(f"Error reading Arduino data: {e}")
+        #     obstruction, smoke_detected = False, False
+
+        # Update alert_data based on detection results
+        if fire_detected:
+            alert_data["Fire"] = True
+        else:
+            alert_data["Fire"] = False
+        if gun_detected:
+            alert_data["Gun"] = True
+        else:
+            alert_data["Gun"] = False
+        if masked_detected:
+            alert_data["Masked"] = True
+        else:
+            alert_data["Masked"] = False
+        if people_count > 0:
+            alert_data["People_Count"] = people_count
+        else:
+            alert_data["People_Count"] = 0
+
+
         
-        # Prepare JSON data for alert
-        alert_data = {
-            "Fire": fire_detected,
-            "Gun": gun_detected,
-            "Masked": masked_detected,
-            "People_Count": people_count
-        }
-
-        # Display the alert signal received from coms.py
-        with alert_lock:
-            external_alert = alert_signal.get("Alert", 0)
-
-        cv2.putText(processed_frame, f"External Alert: {external_alert}", (10, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255) if external_alert else (0, 255, 0), 2)
         cv2.putText(processed_frame, f"People Count: {people_count}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         cv2.putText(processed_frame, f"Fire: {fire_result}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255) if fire_detected else (0, 255, 0), 2)
         cv2.putText(processed_frame, f"Gun: {'Detected' if gun_detected else 'None'}", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255) if gun_detected else (0, 255, 0), 2)
         cv2.putText(processed_frame, f"Final Output: {int(fire_detected or gun_detected or people_count > 1 or masked_detected)}", (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
         processed_frame = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB)
-        yield processed_frame, people_count, fire_result, gun_detected, int(fire_detected or gun_detected or people_count > 1 or masked_detected)
+        alert_string = "Alert" if alert else "No Alert"
+        gun_string = "Detected" if gun_detected else "None"
+        
+        yield processed_frame, people_count, fire_result, gun_string, int(fire_detected or gun_detected or people_count > 1 or masked_detected), alert_string
     
     cap.release()
 
-# Gradio Interface
-iface = gr.Interface(
-    fn=process_frame,
-    inputs=[],
-    outputs=[
-        gr.Image(label="Live Detection", streaming=True),
-        gr.Number(label="People Count"),
-        gr.Label(label="Fire Detection"),
-        gr.Label(label="Gun Detection"),
-        gr.Number(label="Final Output"),
-        gr.Label(label="External Alert")  # Display external alert
-    ],
-    live=True,
-    title="Multi-Object Detection with Live Webcam Feed"
-)
+def read_arduino_data():
+    global alert_data, alert
+    while True:
+        try:
+            arduino_data = arduino.readline().decode('utf-8').strip()
+            if arduino_data:
+                distance, gas_value = map(int, arduino_data.split(','))
+                alert_data["Obstruction"] = distance < DISTANCE_THRESHOLD
+                alert_data["Smoke"] = gas_value > GAS_THRESHOLD
 
-iface.launch()
+            raw_score = calculate_weighted_score(alert_data)
+            stabilized_score = stabilize_score(raw_score)
+        
+            if alert == False:
+                arduino.write(b'0')
+                alert = stabilized_score >= SCORE_THRESHOLD
+                if alert and not sms_sent and sms_toggle:
+                    send_sms_alert()
+                    sms_sent = True
+            if alert:
+                arduino.write(b'1')
+
+            print(alert_data)
+            print(stabilized_score)
+            print(f"Alert Status: {alert}")
+        except Exception as e:
+            print(f"Error reading Arduino data: {e}")
+            alert_data["Obstruction"] = False
+            alert_data["Smoke"] = False
+        
+        # time.sleep(0.5)
+
+# Start Arduino thread
+arduino_thread = threading.Thread(target=read_arduino_data)
+arduino_thread.daemon = True
+arduino_thread.start()
+
+def dismiss_alert():
+    global alert
+    alert = False
+    sms_sent = False
+    return "No Alert"
+
+def update_dismiss_button(alert_status):
+    if alert_status == "Alert":
+        return gr.update(visible=True)
+    else:
+        return gr.update(visible=False)
+
+# Gradio Interface
+with gr.Blocks() as UI:
+    gr.Markdown("# Multi-Object Detection with Live Webcam Feed")
+    
+    with gr.Row():
+        video_output = gr.Image(label="Live Detection")  # Removed streaming=True here
+        with gr.Column():
+            people_count_output = gr.Number(label="People Count")
+            fire_output = gr.Label(label="Fire Detection")
+            gun_output = gr.Label(label="Gun Detection")
+            final_output_display = gr.Number(label="Final Output")
+            alert_display = gr.Label(label="Alert Status", value="No Alert")
+            dismiss_btn = gr.Button("Dismiss Alert", visible=False)
+    
+    # We use an Interface with live=True for streaming the generator outputs
+    stream_interface = gr.Interface(
+        fn=process_frame,
+        inputs=[],
+        outputs=[
+            video_output,
+            people_count_output,
+            fire_output,
+            gun_output,
+            final_output_display,
+            alert_display
+        ],
+        live=True  # This ensures the process_frame generator is polled continuously
+    )
+    
+    stream_interface.render()
+    
+    # When alert_display changes, show/hide the dismiss button
+    alert_display.change(fn=update_dismiss_button, inputs=[alert_display], outputs=[dismiss_btn])
+    # Clicking dismiss updates the label to "No Alert"
+    dismiss_btn.click(fn=dismiss_alert, inputs=[], outputs=[alert_display])
+
+UI.launch()
