@@ -249,7 +249,7 @@ def process_frame():
         alert_string = "Alert" if alert else "No Alert"
         gun_string = "Detected" if gun_detected else "None"
         
-        yield processed_frame, people_count, fire_result, gun_string, int(warning), alert_string
+        yield processed_frame, people_count, fire_result, gun_string, "Warning" if warning else "No Warning", alert_string
     
     cap.release()
 
@@ -326,7 +326,7 @@ with gr.Blocks() as UI:
             people_count_output = gr.Number(label="People Count")
             fire_output = gr.Label(label="Fire Detection")
             gun_output = gr.Label(label="Gun Detection")
-            warning_display = gr.Number(label="Warning Output")
+            warning_display = gr.Label(label="Warning Output")
             alert_display = gr.Label(label="Alert Status", value="No Alert")
             dismiss_btn = gr.Button("Dismiss Alert", visible=False)
             send_alert_btn = gr.Button("Send Alert", visible=True)
