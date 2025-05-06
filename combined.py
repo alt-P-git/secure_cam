@@ -5,8 +5,11 @@ import gradio as gr
 from transformers import pipeline
 from PIL import Image
 from ultralytics import YOLO
-import boto3
-import asyncio
+
+import os
+from twilio.rest import Client
+from dotenv import load_dotenv
+load_dotenv()
 
 import time
 import serial
@@ -33,22 +36,29 @@ mask_detector = pipeline("image-classification", model="Heem2/Facemask-detection
 
 global alert
 alert = False
+warning = False
 sms_sent = False
-sms_toggle = False  #turn global sms system on or off
+sms_toggle = True  #turn global sms system on or off
 arduino = serial.Serial('COM4', 9600)
 
 DISTANCE_THRESHOLD = 20  # cm
 GAS_THRESHOLD = 400  # Adjust based on testing
 SCORE_THRESHOLD = 1  # Threshold for triggering an alert
+WARNING_THRESHOLD = 0.5  # Threshold for warning
+
+account_sid = os.environ.get('TWILIO_ACCOUNT_SID')
+auth_token = os.environ.get('TWILIO_AUTH_TOKEN')
+
+client = Client(account_sid, auth_token)
 
 # Weights for parameters
 WEIGHTS = {
     "Obstruction": 5,
     "Smoke": 5,
-    "Fire": 0.35,
-    "Gun": 0.2,
+    "Fire": 0.5,
+    "Gun": 0.5,
     "Masked": 0.03,
-    "People_Count": 0.02
+    "People_Count": 0.1
 }
 
 alert_data = {
@@ -82,11 +92,12 @@ def stabilize_score(new_score):
 
 def send_sms_alert():
     try:
-        sns = boto3.client('sns', region_name='ap-south-1')  # or your region
-        phone_number = "+918533999067"  # Replace with verified phone number
-        message = "ALERT: Suspicious activity detected by surveillance system."
-        sns.publish(PhoneNumber=phone_number, Message=message)
-        print("SMS sent.")
+        message = client.messages.create(
+            to='+919998031139',
+            from_='+18129933724',
+            body='ALERT: Suspicious activity detected by surveillance system.'
+        )
+        print(message.sid)
     except Exception as e:
         print(f"Failed to send SMS: {e}")
 
@@ -95,7 +106,7 @@ def process_frame():
     global arduino
     global alert_data
 
-    cap = cv2.VideoCapture(0)
+    cap = cv2.VideoCapture(2)
     
     while cap.isOpened():
         ret, frame = cap.read()
@@ -235,16 +246,15 @@ def process_frame():
         alert_string = "Alert" if alert else "No Alert"
         gun_string = "Detected" if gun_detected else "None"
         
-        yield processed_frame, people_count, fire_result, gun_string, int(fire_detected or gun_detected or people_count > 1 or masked_detected), alert_string
         alert_string = "Alert" if alert else "No Alert"
         gun_string = "Detected" if gun_detected else "None"
         
-        yield processed_frame, people_count, fire_result, gun_string, int(fire_detected or gun_detected or people_count > 1 or masked_detected), alert_string
+        yield processed_frame, people_count, fire_result, gun_string, int(warning), alert_string
     
     cap.release()
 
 def read_arduino_data():
-    global alert_data, alert, sms_sent, sms_toggle, smoke_values
+    global alert_data, alert, sms_sent, sms_toggle, smoke_values, warning
     while True:
         try:
             arduino_data = arduino.readline().decode('utf-8').strip()
@@ -270,6 +280,8 @@ def read_arduino_data():
                     sms_sent = True
             if alert:
                 arduino.write(b'1')
+
+            warning = stabilized_score >= WARNING_THRESHOLD
 
             print(alert_data)
             print(stabilized_score)
@@ -299,10 +311,14 @@ def update_dismiss_button(alert_status):
         return gr.update(visible=True)
     else:
         return gr.update(visible=False)
+    
+def send_alert_button():
+    global alert
+    alert = True
 
 # Gradio Interface
 with gr.Blocks() as UI:
-    gr.Markdown("# Multi-Object Detection with Live Webcam Feed")
+    gr.Markdown("# Live Feed")
     
     with gr.Row():
         video_output = gr.Image(label="Live Detection")  # Removed streaming=True here
@@ -310,9 +326,10 @@ with gr.Blocks() as UI:
             people_count_output = gr.Number(label="People Count")
             fire_output = gr.Label(label="Fire Detection")
             gun_output = gr.Label(label="Gun Detection")
-            final_output_display = gr.Number(label="Final Output")
+            warning_display = gr.Number(label="Warning Output")
             alert_display = gr.Label(label="Alert Status", value="No Alert")
             dismiss_btn = gr.Button("Dismiss Alert", visible=False)
+            send_alert_btn = gr.Button("Send Alert", visible=True)
     
     # We use an Interface with live=True for streaming the generator outputs
     stream_interface = gr.Interface(
@@ -323,7 +340,7 @@ with gr.Blocks() as UI:
             people_count_output,
             fire_output,
             gun_output,
-            final_output_display,
+            warning_display,
             alert_display
         ],
         live=True  # This ensures the process_frame generator is polled continuously
@@ -335,41 +352,45 @@ with gr.Blocks() as UI:
     alert_display.change(fn=update_dismiss_button, inputs=[alert_display], outputs=[dismiss_btn])
     # Clicking dismiss updates the label to "No Alert"
     dismiss_btn.click(fn=dismiss_alert, inputs=[], outputs=[alert_display])
+    # only show send alert button only when alert is false
+    send_alert_btn.click(fn=send_alert_button, inputs=[], outputs=[alert_display])
 
-UI.launch()
-with gr.Blocks() as UI:
-    gr.Markdown("# Multi-Object Detection with Live Webcam Feed")
+
+# UI.launch()
+# with gr.Blocks() as UI:
+#     gr.Markdown("# Multi-Object Detection with Live Webcam Feed")
     
-    with gr.Row():
-        video_output = gr.Image(label="Live Detection")  # Removed streaming=True here
-        with gr.Column():
-            people_count_output = gr.Number(label="People Count")
-            fire_output = gr.Label(label="Fire Detection")
-            gun_output = gr.Label(label="Gun Detection")
-            final_output_display = gr.Number(label="Final Output")
-            alert_display = gr.Label(label="Alert Status", value="No Alert")
-            dismiss_btn = gr.Button("Dismiss Alert", visible=False)
+#     with gr.Row():
+#         video_output = gr.Image(label="Live Detection")  # Removed streaming=True here
+#         with gr.Column():
+#             people_count_output = gr.Number(label="People Count")
+#             fire_output = gr.Label(label="Fire Detection")
+#             gun_output = gr.Label(label="Gun Detection")
+#             final_output_display = gr.Number(label="Final Output")
+#             alert_display = gr.Label(label="Alert Status", value="No Alert")
+#             dismiss_btn = gr.Button("Dismiss Alert", visible=False)
+#             send_alert_btn = gr.Button("Send Alert", visible=True)
     
-    # We use an Interface with live=True for streaming the generator outputs
-    stream_interface = gr.Interface(
-        fn=process_frame,
-        inputs=[],
-        outputs=[
-            video_output,
-            people_count_output,
-            fire_output,
-            gun_output,
-            final_output_display,
-            alert_display
-        ],
-        live=True  # This ensures the process_frame generator is polled continuously
-    )
+#     # We use an Interface with live=True for streaming the generator outputs
+#     stream_interface = gr.Interface(
+#         fn=process_frame,
+#         inputs=[],
+#         outputs=[
+#             video_output,
+#             people_count_output,
+#             fire_output,
+#             gun_output,
+#             final_output_display,
+#             alert_display
+#         ],
+#         live=True  # This ensures the process_frame generator is polled continuously
+#     )
     
-    stream_interface.render()
+#     stream_interface.render()
     
-    # When alert_display changes, show/hide the dismiss button
-    alert_display.change(fn=update_dismiss_button, inputs=[alert_display], outputs=[dismiss_btn])
-    # Clicking dismiss updates the label to "No Alert"
-    dismiss_btn.click(fn=dismiss_alert, inputs=[], outputs=[alert_display])
+#     # When alert_display changes, show/hide the dismiss button
+#     alert_display.change(fn=update_dismiss_button, inputs=[alert_display], outputs=[dismiss_btn])
+#     # Clicking dismiss updates the label to "No Alert"
+#     dismiss_btn.click(fn=dismiss_alert, inputs=[], outputs=[alert_display])
 
 UI.launch()
