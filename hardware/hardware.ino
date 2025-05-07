@@ -2,6 +2,7 @@
 #define ECHO_PIN 10
 #define GAS_SENSOR_PIN A0
 #define BUZZER_PIN 8
+#define LED_PIN 13
 
 long duration;
 int distance;
@@ -13,6 +14,7 @@ void setup() {
   pinMode(ECHO_PIN, INPUT);
   pinMode(GAS_SENSOR_PIN, INPUT);
   pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(LED_PIN, OUTPUT);
 }
 
 void loop() {
@@ -24,6 +26,9 @@ void loop() {
   digitalWrite(TRIG_PIN, LOW);
   duration = pulseIn(ECHO_PIN, HIGH);
   distance = duration * 0.034 / 2;
+
+  // Led Pin
+  digitalWrite(LED_PIN, HIGH);
 
   // MQ2 Sensor Reading
   gasValue = analogRead(GAS_SENSOR_PIN);
@@ -38,10 +43,13 @@ void loop() {
     char state = Serial.read();
     if (state == '1') {
       digitalWrite(BUZZER_PIN, HIGH);
+      digitalWrite(LED_PIN, HIGH);
       delay(400);
       digitalWrite(BUZZER_PIN, LOW);
+      digitalWrite(LED_PIN, LOW);
     } else {
       digitalWrite(BUZZER_PIN, LOW);
+      digitalWrite(LED_PIN, HIGH);
       delay(400);
     }
   }
